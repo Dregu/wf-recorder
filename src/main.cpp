@@ -3,29 +3,30 @@
 #include <iostream>
 #include <optional>
 
-#include <list>
-#include <string>
-#include <thread>
-#include <mutex>
 #include <atomic>
 #include <getopt.h>
+#include <list>
+#include <mutex>
+#include <string>
+#include <thread>
 
+#include <fcntl.h>
+#include <gbm.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
-#include <signal.h>
 #include <unistd.h>
-#include <gbm.h>
-#include <fcntl.h>
 #include <xf86drm.h>
 
-#include "frame-writer.hpp"
 #include "buffer-pool.hpp"
+#include "frame-writer.hpp"
+#include "hyprland-toplevel-export-v1-client-protocol.h"
+#include "linux-dmabuf-unstable-v1-client-protocol.h"
 #include "wlr-screencopy-unstable-v1-client-protocol.h"
 #include "xdg-output-unstable-v1-client-protocol.h"
-#include "linux-dmabuf-unstable-v1-client-protocol.h"
 
 #include "config.h"
 
@@ -36,25 +37,26 @@ AudioReaderParams audioParams;
 
 #define MAX_FRAME_FAILURES 16
 
-static const int GRACEFUL_TERMINATION_SIGNALS[] = { SIGTERM, SIGINT, SIGHUP };
+static const int GRACEFUL_TERMINATION_SIGNALS[] = {SIGTERM, SIGINT, SIGHUP};
 
 std::mutex frame_writer_mutex, frame_writer_pending_mutex;
 std::unique_ptr<FrameWriter> frame_writer;
 
 static int drm_fd = -1;
-static struct gbm_device *gbm_device = NULL;
+static struct gbm_device* gbm_device = NULL;
 static std::string drm_device_name;
 
-static struct wl_shm *shm = NULL;
-static struct zxdg_output_manager_v1 *xdg_output_manager = NULL;
-static struct zwlr_screencopy_manager_v1 *screencopy_manager = NULL;
-static struct zwp_linux_dmabuf_v1 *dmabuf = NULL;
+static struct wl_shm* shm = NULL;
+static struct zxdg_output_manager_v1* xdg_output_manager = NULL;
+static struct zwlr_screencopy_manager_v1* screencopy_manager = NULL;
+static struct hyprland_toplevel_export_manager_v1* hypr_manager = NULL;
+static struct zwp_linux_dmabuf_v1* dmabuf = NULL;
 void request_next_frame();
 
 struct wf_recorder_output
 {
-    wl_output *output;
-    zxdg_output_v1 *zxdg_output;
+    wl_output* output;
+    zxdg_output_v1* zxdg_output;
     std::string name, description;
     int32_t x, y, width, height;
     int32_t transform;
@@ -62,69 +64,42 @@ struct wf_recorder_output
 
 std::list<wf_recorder_output> available_outputs;
 
-static void
-display_handle_geometry(void *data,
-                        wl_output *,
-                        int32_t, int32_t,
-                        int32_t,
-                        int32_t,
-                        int32_t,
-                        const char *,
-                        const char *,
-                        int32_t transform)
+static void display_handle_geometry(
+    void* data, wl_output*, int32_t, int32_t, int32_t, int32_t, int32_t, const char*, const char*, int32_t transform)
 {
-    wf_recorder_output *wo = (wf_recorder_output*) data;
-
+    wf_recorder_output* wo = (wf_recorder_output*)data;
     wo->transform = transform;
 }
 
-static void
-display_handle_mode(void *,
-                    struct wl_output *,
-                    uint32_t,
-                    int32_t,
-                    int32_t,
-                    int32_t)
+static void display_handle_mode(void*, struct wl_output*, uint32_t, int32_t, int32_t, int32_t)
 {
 }
 
-static void
-display_handle_done(void *, wl_output *)
+static void display_handle_done(void*, wl_output*)
 {
 }
 
-static void
-display_handle_scale(void *,
-                     wl_output *,
-                     int32_t)
+static void display_handle_scale(void*, wl_output*, int32_t)
 {
 }
 
-static void
-display_handle_name(void *,
-                    wl_output *,
-                    const char *)
+static void display_handle_name(void*, wl_output*, const char*)
 {
 }
 
-static void
-display_handle_description(void *,
-                           wl_output *,
-                           const char *)
+static void display_handle_description(void*, wl_output*, const char*)
 {
 }
 
 static const struct wl_output_listener output_listener = {
-	display_handle_geometry,
-	display_handle_mode,
-	display_handle_done,
-	display_handle_scale,
-	display_handle_name,
-	display_handle_description
-};
+    display_handle_geometry,
+    display_handle_mode,
+    display_handle_done,
+    display_handle_scale,
+    display_handle_name,
+    display_handle_description};
 
-static void handle_xdg_output_logical_position(void*,
-    zxdg_output_v1* zxdg_output, int32_t x, int32_t y)
+static void handle_xdg_output_logical_position(void*, zxdg_output_v1* zxdg_output, int32_t x, int32_t y)
 {
     for (auto& wo : available_outputs)
     {
@@ -136,8 +111,7 @@ static void handle_xdg_output_logical_position(void*,
     }
 }
 
-static void handle_xdg_output_logical_size(void*,
-    zxdg_output_v1* zxdg_output, int32_t w, int32_t h)
+static void handle_xdg_output_logical_size(void*, zxdg_output_v1* zxdg_output, int32_t w, int32_t h)
 {
     for (auto& wo : available_outputs)
     {
@@ -149,10 +123,11 @@ static void handle_xdg_output_logical_size(void*,
     }
 }
 
-static void handle_xdg_output_done(void*, zxdg_output_v1*) { }
+static void handle_xdg_output_done(void*, zxdg_output_v1*)
+{
+}
 
-static void handle_xdg_output_name(void*, zxdg_output_v1 *zxdg_output_v1,
-    const char *name)
+static void handle_xdg_output_name(void*, zxdg_output_v1* zxdg_output_v1, const char* name)
 {
     for (auto& wo : available_outputs)
     {
@@ -161,8 +136,7 @@ static void handle_xdg_output_name(void*, zxdg_output_v1 *zxdg_output_v1,
     }
 }
 
-static void handle_xdg_output_description(void*, zxdg_output_v1 *zxdg_output_v1,
-    const char *description)
+static void handle_xdg_output_description(void*, zxdg_output_v1* zxdg_output_v1, const char* description)
 {
     for (auto& wo : available_outputs)
     {
@@ -171,21 +145,19 @@ static void handle_xdg_output_description(void*, zxdg_output_v1 *zxdg_output_v1,
     }
 }
 
-
 const zxdg_output_v1_listener xdg_output_implementation = {
     .logical_position = handle_xdg_output_logical_position,
     .logical_size = handle_xdg_output_logical_size,
     .done = handle_xdg_output_done,
     .name = handle_xdg_output_name,
-    .description = handle_xdg_output_description
-};
+    .description = handle_xdg_output_description};
 
 struct wf_buffer : public buffer_pool_buf
 {
-    struct gbm_bo *bo = nullptr;
-    zwp_linux_buffer_params_v1 *params = nullptr;
-    struct wl_buffer *wl_buffer = nullptr;
-    void *data = nullptr;
+    struct gbm_bo* bo = nullptr;
+    zwp_linux_buffer_params_v1* params = nullptr;
+    struct wl_buffer* wl_buffer = nullptr;
+    void* data = nullptr;
     size_t size = 0;
     enum wl_shm_format format;
     int drm_format;
@@ -206,15 +178,18 @@ static int backingfile(off_t size)
 {
     char name[] = "/tmp/wf-recorder-shared-XXXXXX";
     int fd = mkstemp(name);
-    if (fd < 0) {
+    if (fd < 0)
+    {
         return -1;
     }
 
     int ret;
-    while ((ret = ftruncate(fd, size)) == EINTR) {
+    while ((ret = ftruncate(fd, size)) == EINTR)
+    {
         // No-op
     }
-    if (ret < 0) {
+    if (ret < 0)
+    {
         close(fd);
         return -1;
     }
@@ -223,28 +198,28 @@ static int backingfile(off_t size)
     return fd;
 }
 
-static struct wl_buffer *create_shm_buffer(uint32_t fmt,
-    int width, int height, int stride, void **data_out)
+static struct wl_buffer* create_shm_buffer(uint32_t fmt, int width, int height, int stride, void** data_out)
 {
     int size = stride * height;
 
     int fd = backingfile(size);
-    if (fd < 0) {
+    if (fd < 0)
+    {
         fprintf(stderr, "creating a buffer file for %d B failed: %m\n", size);
         return NULL;
     }
 
-    void *data = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-    if (data == MAP_FAILED) {
+    void* data = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (data == MAP_FAILED)
+    {
         fprintf(stderr, "mmap failed: %m\n");
         close(fd);
         return NULL;
     }
 
-    struct wl_shm_pool *pool = wl_shm_create_pool(shm, fd, size);
+    struct wl_shm_pool* pool = wl_shm_create_pool(shm, fd, size);
     close(fd);
-    struct wl_buffer *buffer = wl_shm_pool_create_buffer(pool, 0, width, height,
-        stride, fmt);
+    struct wl_buffer* buffer = wl_shm_pool_create_buffer(pool, 0, width, height, stride, fmt);
     wl_shm_pool_destroy(pool);
 
     *data_out = data;
@@ -266,22 +241,120 @@ void free_shm_buffer(wf_buffer& buffer)
 static bool use_damage = true;
 static bool use_dmabuf = false;
 static bool use_hwupload = false;
+static bool use_hypr = false;
+static uint64_t hypr_address;
 
 static uint32_t wl_shm_to_drm_format(uint32_t format)
 {
-    if (format == WL_SHM_FORMAT_ARGB8888) {
+    if (format == WL_SHM_FORMAT_ARGB8888)
+    {
         return GBM_FORMAT_ARGB8888;
-    } else if (format == WL_SHM_FORMAT_XRGB8888) {
+    }
+    else if (format == WL_SHM_FORMAT_XRGB8888)
+    {
         return GBM_FORMAT_XRGB8888;
-    } else {
+    }
+    else
+    {
         return format;
     }
 }
 
-static void frame_handle_buffer(void *, struct zwlr_screencopy_frame_v1 *frame, uint32_t format,
-    uint32_t width, uint32_t height, uint32_t stride)
+static void toplevel_export_frame_handle_buffer(
+    void* data,
+    struct hyprland_toplevel_export_frame_v1* frame,
+    uint32_t format,
+    uint32_t width,
+    uint32_t height,
+    uint32_t stride)
 {
-    if (use_dmabuf) {
+    auto& buffer = buffers.capture();
+    auto old_format = buffer.format;
+    buffer.format = (wl_shm_format)format;
+    buffer.drm_format = wl_shm_to_drm_format(format);
+    buffer.width = width;
+    buffer.height = height;
+    buffer.stride = stride;
+
+    /* ffmpeg requires even width and height */
+    if (buffer.width % 2)
+        buffer.width -= 1;
+    if (buffer.height % 2)
+        buffer.height -= 1;
+
+    if (!buffer.wl_buffer || old_format != format)
+    {
+        free_shm_buffer(buffer);
+        buffer.wl_buffer = create_shm_buffer(format, width, height, stride, &buffer.data);
+    }
+
+    if (buffer.wl_buffer == NULL)
+    {
+        fprintf(stderr, "failed to create buffer\n");
+        exit(EXIT_FAILURE);
+    }
+
+    hyprland_toplevel_export_frame_v1_copy(frame, buffer.wl_buffer, !use_damage);
+}
+
+static void toplevel_export_frame_handle_damage(
+    void* data,
+    struct hyprland_toplevel_export_frame_v1* frame,
+    uint32_t x,
+    uint32_t y,
+    uint32_t width,
+    uint32_t height)
+{
+}
+
+static void
+toplevel_export_frame_handle_flags(void* data, struct hyprland_toplevel_export_frame_v1* frame, uint32_t flags)
+{
+}
+
+static void toplevel_export_frame_handle_ready(
+    void* data,
+    struct hyprland_toplevel_export_frame_v1* frame,
+    uint32_t tv_sec_hi,
+    uint32_t tv_sec_lo,
+    uint32_t tv_nsec)
+{
+    auto& buffer = buffers.capture();
+    buffer_copy_done = true;
+    buffer.presented.tv_sec = ((1ll * tv_sec_hi) << 32ll) | tv_sec_lo;
+    buffer.presented.tv_nsec = tv_nsec;
+}
+
+static void toplevel_export_frame_handle_failed(void* data, struct hyprland_toplevel_export_frame_v1* frame)
+{
+    fprintf(stderr, "failed to copy window\n");
+    exit(EXIT_FAILURE);
+}
+
+static void toplevel_export_frame_handle_linux_dmabuf(
+    void* data, struct hyprland_toplevel_export_frame_v1* frame, uint32_t format, uint32_t width, uint32_t height)
+{
+}
+
+static void toplevel_export_frame_handle_buffer_done(void* data, struct hyprland_toplevel_export_frame_v1* frame)
+{
+}
+
+static const struct hyprland_toplevel_export_frame_v1_listener toplevel_export_frame_listener = {
+    .buffer = toplevel_export_frame_handle_buffer,
+    .damage = toplevel_export_frame_handle_damage,
+    .flags = toplevel_export_frame_handle_flags,
+    .ready = toplevel_export_frame_handle_ready,
+    .failed = toplevel_export_frame_handle_failed,
+    .linux_dmabuf = toplevel_export_frame_handle_linux_dmabuf,
+    .buffer_done = toplevel_export_frame_handle_buffer_done,
+};
+
+static void frame_handle_buffer(
+    void*, struct zwlr_screencopy_frame_v1* frame, uint32_t format, uint32_t width, uint32_t height, uint32_t stride)
+{
+    if (use_dmabuf)
+    {
         return;
     }
 
@@ -299,32 +372,38 @@ static void frame_handle_buffer(void *, struct zwlr_screencopy_frame_v1 *frame, 
     if (buffer.height % 2)
         buffer.height -= 1;
 
-    if (!buffer.wl_buffer || old_format != format) {
+    if (!buffer.wl_buffer || old_format != format)
+    {
         free_shm_buffer(buffer);
-        buffer.wl_buffer =
-            create_shm_buffer(format, width, height, stride, &buffer.data);
+        buffer.wl_buffer = create_shm_buffer(format, width, height, stride, &buffer.data);
     }
 
-    if (buffer.wl_buffer == NULL) {
+    if (buffer.wl_buffer == NULL)
+    {
         fprintf(stderr, "failed to create buffer\n");
         exit(EXIT_FAILURE);
     }
 
-    if (use_damage) {
+    if (use_damage)
+    {
         zwlr_screencopy_frame_v1_copy_with_damage(frame, buffer.wl_buffer);
-    } else {
+    }
+    else
+    {
         zwlr_screencopy_frame_v1_copy(frame, buffer.wl_buffer);
     }
 }
 
-static void frame_handle_flags(void*, struct zwlr_screencopy_frame_v1 *, uint32_t flags) {
+static void frame_handle_flags(void*, struct zwlr_screencopy_frame_v1*, uint32_t flags)
+{
     buffers.capture().y_invert = flags & ZWLR_SCREENCOPY_FRAME_V1_FLAGS_Y_INVERT;
 }
 
 int32_t frame_failed_cnt = 0;
 
-static void frame_handle_ready(void *, struct zwlr_screencopy_frame_v1 *,
-    uint32_t tv_sec_hi, uint32_t tv_sec_low, uint32_t tv_nsec) {
+static void
+frame_handle_ready(void*, struct zwlr_screencopy_frame_v1*, uint32_t tv_sec_hi, uint32_t tv_sec_low, uint32_t tv_nsec)
+{
 
     auto& buffer = buffers.capture();
     buffer_copy_done = true;
@@ -333,7 +412,8 @@ static void frame_handle_ready(void *, struct zwlr_screencopy_frame_v1 *,
     frame_failed_cnt = 0;
 }
 
-static void frame_handle_failed(void *, struct zwlr_screencopy_frame_v1 *) {
+static void frame_handle_failed(void*, struct zwlr_screencopy_frame_v1*)
+{
     std::cerr << "Failed to copy frame, retrying..." << std::endl;
     ++frame_failed_cnt;
     request_next_frame();
@@ -344,27 +424,30 @@ static void frame_handle_failed(void *, struct zwlr_screencopy_frame_v1 *) {
     }
 }
 
-static void frame_handle_damage(void *, struct zwlr_screencopy_frame_v1 *,
-    uint32_t, uint32_t, uint32_t, uint32_t)
+static void frame_handle_damage(void*, struct zwlr_screencopy_frame_v1*, uint32_t, uint32_t, uint32_t, uint32_t)
 {
 }
 
-static void dmabuf_created(void *data, struct zwp_linux_buffer_params_v1 *,
-    struct wl_buffer *wl_buffer) {
+static void dmabuf_created(void* data, struct zwp_linux_buffer_params_v1*, struct wl_buffer* wl_buffer)
+{
 
     auto& buffer = buffers.capture();
     buffer.wl_buffer = wl_buffer;
 
-    zwlr_screencopy_frame_v1 *frame = (zwlr_screencopy_frame_v1*) data;
+    zwlr_screencopy_frame_v1* frame = (zwlr_screencopy_frame_v1*)data;
 
-    if (use_damage) {
+    if (use_damage)
+    {
         zwlr_screencopy_frame_v1_copy_with_damage(frame, buffer.wl_buffer);
-    } else {
+    }
+    else
+    {
         zwlr_screencopy_frame_v1_copy(frame, buffer.wl_buffer);
     }
 }
 
-static void dmabuf_failed(void *, struct zwp_linux_buffer_params_v1 *) {
+static void dmabuf_failed(void*, struct zwp_linux_buffer_params_v1*)
+{
     std::cerr << "Failed to create dmabuf" << std::endl;
     exit_main_loop = true;
 }
@@ -376,19 +459,25 @@ static const struct zwp_linux_buffer_params_v1_listener params_listener = {
 
 static wl_shm_format drm_to_wl_shm_format(uint32_t format)
 {
-    if (format == GBM_FORMAT_ARGB8888) {
+    if (format == GBM_FORMAT_ARGB8888)
+    {
         return WL_SHM_FORMAT_ARGB8888;
-    } else if (format == GBM_FORMAT_XRGB8888) {
+    }
+    else if (format == GBM_FORMAT_XRGB8888)
+    {
         return WL_SHM_FORMAT_XRGB8888;
-    } else {
+    }
+    else
+    {
         return (wl_shm_format)format;
     }
 }
 
-static void frame_handle_linux_dmabuf(void *, struct zwlr_screencopy_frame_v1 *frame,
-    uint32_t format, uint32_t width, uint32_t height)
+static void frame_handle_linux_dmabuf(
+    void*, struct zwlr_screencopy_frame_v1* frame, uint32_t format, uint32_t width, uint32_t height)
 {
-    if (!use_dmabuf) {
+    if (!use_dmabuf)
+    {
         return;
     }
 
@@ -400,9 +489,12 @@ static void frame_handle_linux_dmabuf(void *, struct zwlr_screencopy_frame_v1 *f
     buffer.width = width;
     buffer.height = height;
 
-    if (!buffer.wl_buffer || (old_format != buffer.format)) {
-        if (buffer.bo) {
-            if (buffer.wl_buffer) {
+    if (!buffer.wl_buffer || (old_format != buffer.format))
+    {
+        if (buffer.bo)
+        {
+            if (buffer.wl_buffer)
+            {
                 wl_buffer_destroy(buffer.wl_buffer);
             }
 
@@ -411,12 +503,11 @@ static void frame_handle_linux_dmabuf(void *, struct zwlr_screencopy_frame_v1 *f
         }
 
         const uint64_t modifier = 0; // DRM_FORMAT_MOD_LINEAR
-        buffer.bo = gbm_bo_create_with_modifiers(gbm_device, buffer.width,
-            buffer.height, format, &modifier, 1);
+        buffer.bo = gbm_bo_create_with_modifiers(gbm_device, buffer.width, buffer.height, format, &modifier, 1);
         if (buffer.bo == NULL)
         {
-            buffer.bo = gbm_bo_create(gbm_device, buffer.width,
-                buffer.height, format, GBM_BO_USE_LINEAR | GBM_BO_USE_RENDERING);
+            buffer.bo = gbm_bo_create(
+                gbm_device, buffer.width, buffer.height, format, GBM_BO_USE_LINEAR | GBM_BO_USE_RENDERING);
         }
         if (buffer.bo == NULL)
         {
@@ -430,25 +521,33 @@ static void frame_handle_linux_dmabuf(void *, struct zwlr_screencopy_frame_v1 *f
         buffer.params = zwp_linux_dmabuf_v1_create_params(dmabuf);
 
         uint64_t mod = gbm_bo_get_modifier(buffer.bo);
-        zwp_linux_buffer_params_v1_add(buffer.params,
-            gbm_bo_get_fd(buffer.bo), 0,
+        zwp_linux_buffer_params_v1_add(
+            buffer.params,
+            gbm_bo_get_fd(buffer.bo),
+            0,
             gbm_bo_get_offset(buffer.bo, 0),
             gbm_bo_get_stride(buffer.bo),
-            mod >> 32, mod & 0xffffffff);
+            mod >> 32,
+            mod & 0xffffffff);
 
         zwp_linux_buffer_params_v1_add_listener(buffer.params, &params_listener, frame);
-        zwp_linux_buffer_params_v1_create(buffer.params, buffer.width,
-            buffer.height, format, 0);
-    } else {
-        if (use_damage) {
+        zwp_linux_buffer_params_v1_create(buffer.params, buffer.width, buffer.height, format, 0);
+    }
+    else
+    {
+        if (use_damage)
+        {
             zwlr_screencopy_frame_v1_copy_with_damage(frame, buffer.wl_buffer);
-        } else {
+        }
+        else
+        {
             zwlr_screencopy_frame_v1_copy(frame, buffer.wl_buffer);
         }
     }
 }
 
-static void frame_handle_buffer_done(void *, struct zwlr_screencopy_frame_v1 *) {
+static void frame_handle_buffer_done(void*, struct zwlr_screencopy_frame_v1*)
+{
 }
 
 static const struct zwlr_screencopy_frame_v1_listener frame_listener = {
@@ -461,54 +560,53 @@ static const struct zwlr_screencopy_frame_v1_listener frame_listener = {
     .buffer_done = frame_handle_buffer_done,
 };
 
-static void dmabuf_feedback_done(void *, struct zwp_linux_dmabuf_feedback_v1 *feedback)
+static void dmabuf_feedback_done(void*, struct zwp_linux_dmabuf_feedback_v1* feedback)
 {
     zwp_linux_dmabuf_feedback_v1_destroy(feedback);
 }
 
-static void dmabuf_feedback_format_table(void *, struct zwp_linux_dmabuf_feedback_v1 *,
-    int32_t fd, uint32_t)
+static void dmabuf_feedback_format_table(void*, struct zwp_linux_dmabuf_feedback_v1*, int32_t fd, uint32_t)
 {
     close(fd);
 }
 
-static void dmabuf_feedback_main_device(void *, struct zwp_linux_dmabuf_feedback_v1 *,
-    struct wl_array *device)
+static void dmabuf_feedback_main_device(void*, struct zwp_linux_dmabuf_feedback_v1*, struct wl_array* device)
 {
     dev_t dev_id;
     memcpy(&dev_id, device->data, device->size);
 
-    drmDevice *dev = NULL;
-    if (drmGetDeviceFromDevId(dev_id, 0, &dev) != 0) {
+    drmDevice* dev = NULL;
+    if (drmGetDeviceFromDevId(dev_id, 0, &dev) != 0)
+    {
         std::cerr << "Failed to get DRM device from dev id " << strerror(errno) << std::endl;
         return;
     }
 
-    if (dev->available_nodes & (1 << DRM_NODE_RENDER)) {
+    if (dev->available_nodes & (1 << DRM_NODE_RENDER))
+    {
         drm_device_name = dev->nodes[DRM_NODE_RENDER];
-    } else if (dev->available_nodes & (1 << DRM_NODE_PRIMARY)) {
+    }
+    else if (dev->available_nodes & (1 << DRM_NODE_PRIMARY))
+    {
         drm_device_name = dev->nodes[DRM_NODE_PRIMARY];
     }
 
     drmFreeDevice(&dev);
 }
 
-static void dmabuf_feedback_tranche_done(void *, struct zwp_linux_dmabuf_feedback_v1 *)
+static void dmabuf_feedback_tranche_done(void*, struct zwp_linux_dmabuf_feedback_v1*)
 {
 }
 
-static void dmabuf_feedback_tranche_target_device(void *, struct zwp_linux_dmabuf_feedback_v1 *,
-    struct wl_array *)
+static void dmabuf_feedback_tranche_target_device(void*, struct zwp_linux_dmabuf_feedback_v1*, struct wl_array*)
 {
 }
 
-static void dmabuf_feedback_tranche_formats(void *, struct zwp_linux_dmabuf_feedback_v1 *,
-    struct wl_array *)
+static void dmabuf_feedback_tranche_formats(void*, struct zwp_linux_dmabuf_feedback_v1*, struct wl_array*)
 {
 }
 
-static void dmabuf_feedback_tranche_flags(void *, struct zwp_linux_dmabuf_feedback_v1 *,
-    uint32_t)
+static void dmabuf_feedback_tranche_flags(void*, struct zwp_linux_dmabuf_feedback_v1*, uint32_t)
 {
 }
 
@@ -522,8 +620,8 @@ static const struct zwp_linux_dmabuf_feedback_v1_listener dmabuf_feedback_listen
     .tranche_flags = dmabuf_feedback_tranche_flags,
 };
 
-static void handle_global(void*, struct wl_registry *registry,
-    uint32_t name, const char *interface, uint32_t) {
+static void handle_global(void*, struct wl_registry* registry, uint32_t name, const char* interface, uint32_t)
+{
 
     if (strcmp(interface, wl_output_interface.name) == 0)
     {
@@ -535,31 +633,39 @@ static void handle_global(void*, struct wl_registry *registry,
     }
     else if (strcmp(interface, wl_shm_interface.name) == 0)
     {
-        shm = (wl_shm*) wl_registry_bind(registry, name, &wl_shm_interface, 1);
+        shm = (wl_shm*)wl_registry_bind(registry, name, &wl_shm_interface, 1);
     }
     else if (strcmp(interface, zwlr_screencopy_manager_v1_interface.name) == 0)
     {
-        screencopy_manager = (zwlr_screencopy_manager_v1*) wl_registry_bind(registry, name,
-            &zwlr_screencopy_manager_v1_interface, 3);
+        screencopy_manager =
+            (zwlr_screencopy_manager_v1*)wl_registry_bind(registry, name, &zwlr_screencopy_manager_v1_interface, 3);
     }
     else if (strcmp(interface, zxdg_output_manager_v1_interface.name) == 0)
     {
-        xdg_output_manager = (zxdg_output_manager_v1*) wl_registry_bind(registry, name,
-            &zxdg_output_manager_v1_interface, 2); // version 2 for name & description, if available
+        xdg_output_manager = (zxdg_output_manager_v1*)wl_registry_bind(
+            registry,
+            name,
+            &zxdg_output_manager_v1_interface,
+            2); // version 2 for name & description, if available
     }
     else if (strcmp(interface, zwp_linux_dmabuf_v1_interface.name) == 0)
     {
-        dmabuf = (zwp_linux_dmabuf_v1*) wl_registry_bind(registry, name,
-            &zwp_linux_dmabuf_v1_interface, 4);
-        if (dmabuf) {
-            struct zwp_linux_dmabuf_feedback_v1 *feedback =
-                zwp_linux_dmabuf_v1_get_default_feedback(dmabuf);
+        dmabuf = (zwp_linux_dmabuf_v1*)wl_registry_bind(registry, name, &zwp_linux_dmabuf_v1_interface, 4);
+        if (dmabuf)
+        {
+            struct zwp_linux_dmabuf_feedback_v1* feedback = zwp_linux_dmabuf_v1_get_default_feedback(dmabuf);
             zwp_linux_dmabuf_feedback_v1_add_listener(feedback, &dmabuf_feedback_listener, NULL);
         }
     }
+    else if (strcmp(interface, hyprland_toplevel_export_manager_v1_interface.name) == 0)
+    {
+        hypr_manager = (hyprland_toplevel_export_manager_v1*)wl_registry_bind(
+            registry, name, &hyprland_toplevel_export_manager_v1_interface, 2);
+    }
 }
 
-static void handle_global_remove(void*, struct wl_registry *, uint32_t) {
+static void handle_global_remove(void*, struct wl_registry*, uint32_t)
+{
     // Who cares?
 }
 
@@ -568,17 +674,19 @@ static const struct wl_registry_listener registry_listener = {
     .global_remove = handle_global_remove,
 };
 
-static uint64_t timespec_to_usec (const timespec& ts)
+static uint64_t timespec_to_usec(const timespec& ts)
 {
     return ts.tv_sec * 1000000ll + 1ll * ts.tv_nsec / 1000ll;
 }
 
 static InputFormat get_input_format(wf_buffer& buffer)
 {
-    if (use_dmabuf && !use_hwupload) {
+    if (use_dmabuf && !use_hwupload)
+    {
         return INPUT_FORMAT_DMABUF;
     }
-    switch (buffer.format) {
+    switch (buffer.format)
+    {
     case WL_SHM_FORMAT_ARGB8888:
     case WL_SHM_FORMAT_XRGB8888:
         return INPUT_FORMAT_BGR0;
@@ -614,7 +722,8 @@ static InputFormat get_input_format(wf_buffer& buffer)
 
 static void write_loop(FrameWriterParams params)
 {
-    /* Ignore SIGTERM/SIGINT/SIGHUP, main loop is responsible for the exit_main_loop signal */
+    /* Ignore SIGTERM/SIGINT/SIGHUP, main loop is responsible for the
+     * exit_main_loop signal */
     sigset_t sigset;
     sigemptyset(&sigset);
     for (auto signo : GRACEFUL_TERMINATION_SIGNALS)
@@ -629,13 +738,15 @@ static void write_loop(FrameWriterParams params)
 
     std::optional<uint64_t> first_frame_ts;
 
-    while(!exit_main_loop)
+    while (!exit_main_loop)
     {
         // wait for frame to become available
-        while(buffers.encode().ready_encode() != true && !exit_main_loop) {
+        while (buffers.encode().ready_encode() != true && !exit_main_loop)
+        {
             std::this_thread::sleep_for(std::chrono::microseconds(1000));
         }
-        if (exit_main_loop) {
+        if (exit_main_loop)
+        {
             break;
         }
 
@@ -653,14 +764,14 @@ static void write_loop(FrameWriterParams params)
             params.width = buffer.width;
             params.height = buffer.height;
             params.stride = buffer.stride;
-            frame_writer = std::unique_ptr<FrameWriter> (new FrameWriter(params));
+            frame_writer = std::unique_ptr<FrameWriter>(new FrameWriter(params));
 
 #ifdef HAVE_AUDIO
             if (params.enable_audio)
             {
                 audioParams.audio_frame_size = frame_writer->get_audio_buffer_size();
                 audioParams.sample_rate = params.sample_rate;
-                pr = std::unique_ptr<AudioReader> (AudioReader::create(audioParams));
+                pr = std::unique_ptr<AudioReader>(AudioReader::create(audioParams));
                 if (pr)
                 {
                     pr->start();
@@ -671,53 +782,69 @@ static void write_loop(FrameWriterParams params)
 
         bool drop = false;
         uint64_t sync_timestamp = 0;
-        if (first_frame_ts.has_value()) {
+        if (first_frame_ts.has_value())
+        {
             sync_timestamp = buffer.base_usec - first_frame_ts.value();
 #ifdef HAVE_AUDIO
-        } else if (pr) {
-            if (!pr->get_time_base() || pr->get_time_base() > buffer.base_usec) {
+        }
+        else if (pr)
+        {
+            if (!pr->get_time_base() || pr->get_time_base() > buffer.base_usec)
+            {
                 drop = true;
-            } else {
+            }
+            else
+            {
                 first_frame_ts = pr->get_time_base();
                 sync_timestamp = buffer.base_usec - first_frame_ts.value();
             }
 #endif
-        } else {
+        }
+        else
+        {
             sync_timestamp = 0;
             first_frame_ts = buffer.base_usec;
         }
 
         bool do_cont = false;
 
-        if (!drop) {
-            if (use_dmabuf) {
-                if (use_hwupload) {
+        if (!drop)
+        {
+            if (use_dmabuf)
+            {
+                if (use_hwupload)
+                {
                     uint32_t stride = 0;
-                    void *map_data = NULL;
-                    void *data = gbm_bo_map(buffer.bo, 0, 0, buffer.width, buffer.height,
-                        GBM_BO_TRANSFER_READ, &stride, &map_data);
-                    if (!data) {
+                    void* map_data = NULL;
+                    void* data = gbm_bo_map(
+                        buffer.bo, 0, 0, buffer.width, buffer.height, GBM_BO_TRANSFER_READ, &stride, &map_data);
+                    if (!data)
+                    {
                         std::cerr << "Failed to map bo" << std::endl;
                         break;
                     }
-                    do_cont = frame_writer->add_frame((unsigned char*)data,
-                        sync_timestamp, buffer.y_invert);
+                    do_cont = frame_writer->add_frame((unsigned char*)data, sync_timestamp, buffer.y_invert);
                     gbm_bo_unmap(buffer.bo, map_data);
-                } else {
-                    do_cont = frame_writer->add_frame(buffer.bo,
-                        sync_timestamp, buffer.y_invert);
                 }
-            } else {
-                do_cont = frame_writer->add_frame((unsigned char*)buffer.data,
-                    sync_timestamp, buffer.y_invert);
+                else
+                {
+                    do_cont = frame_writer->add_frame(buffer.bo, sync_timestamp, buffer.y_invert);
+                }
             }
-        } else {
+            else
+            {
+                do_cont = frame_writer->add_frame((unsigned char*)buffer.data, sync_timestamp, buffer.y_invert);
+            }
+        }
+        else
+        {
             do_cont = true;
         }
 
         frame_writer_mutex.unlock();
 
-        if (!do_cont) {
+        if (!do_cont)
+        {
             break;
         }
 
@@ -740,8 +867,8 @@ void handle_graceful_termination(int)
 
 static bool user_specified_overwrite(std::string filename)
 {
-    struct stat buffer;   
-    if (stat (filename.c_str(), &buffer) == 0 && !S_ISCHR(buffer.st_mode))
+    struct stat buffer;
+    if (stat(filename.c_str(), &buffer) == 0 && !S_ISCHR(buffer.st_mode))
     {
         std::string input;
         std::cerr << "Output file \"" << filename << "\" exists. Overwrite? Y/n: ";
@@ -750,7 +877,7 @@ static bool user_specified_overwrite(std::string filename)
         {
             std::cerr << "Use -f to specify the file name." << std::endl;
             return false;
-	}
+        }
     }
 
     return true;
@@ -758,12 +885,20 @@ static bool user_specified_overwrite(std::string filename)
 
 static void check_has_protos()
 {
-    if (shm == NULL) {
+    if (shm == NULL)
+    {
         fprintf(stderr, "compositor is missing wl_shm\n");
         exit(EXIT_FAILURE);
     }
-    if (screencopy_manager == NULL) {
+    if (screencopy_manager == NULL)
+    {
         fprintf(stderr, "compositor doesn't support wlr-screencopy-unstable-v1\n");
+        exit(EXIT_FAILURE);
+    }
+
+    if (use_hypr && hypr_manager == NULL)
+    {
+        fprintf(stderr, "compositor doesn't support hyprland-toplevel-export-v1\n");
         exit(EXIT_FAILURE);
     }
 
@@ -773,7 +908,8 @@ static void check_has_protos()
         exit(EXIT_FAILURE);
     }
 
-    if (use_dmabuf && dmabuf == NULL) {
+    if (use_dmabuf && dmabuf == NULL)
+    {
         fprintf(stderr, "compositor doesn't support linux-dmabuf-unstable-v1\n");
         exit(EXIT_FAILURE);
     }
@@ -785,7 +921,7 @@ static void check_has_protos()
     }
 }
 
-wl_display *display = NULL;
+wl_display* display = NULL;
 static void sync_wayland()
 {
     wl_display_dispatch(display);
@@ -796,10 +932,8 @@ static void load_output_info()
 {
     for (auto& wo : available_outputs)
     {
-        wo.zxdg_output = zxdg_output_manager_v1_get_xdg_output(
-            xdg_output_manager, wo.output);
-        zxdg_output_v1_add_listener(wo.zxdg_output,
-            &xdg_output_implementation, NULL);
+        wo.zxdg_output = zxdg_output_manager_v1_get_xdg_output(xdg_output_manager, wo.output);
+        zxdg_output_v1_add_listener(wo.zxdg_output, &xdg_output_implementation, NULL);
     }
 
     sync_wayland();
@@ -810,12 +944,9 @@ static void print_available_outputs()
     int i = 1;
     for (auto& wo : available_outputs)
     {
-        printf("%d. Name: %s Description: %s\n", i++, wo.name.c_str(),
-            wo.description.c_str());
+        printf("%d. Name: %s Description: %s\n", i++, wo.name.c_str(), wo.description.c_str());
     }
 }
-
-
 
 static wf_recorder_output* choose_interactive()
 {
@@ -840,18 +971,20 @@ struct capture_region
     int32_t x, y;
     int32_t width, height;
 
-    capture_region()
-        : capture_region(0, 0, 0, 0) {}
+    capture_region() : capture_region(0, 0, 0, 0)
+    {
+    }
 
     capture_region(int32_t _x, int32_t _y, int32_t _width, int32_t _height)
-        : x(_x), y(_y), width(_width), height(_height) { }
+        : x(_x), y(_y), width(_width), height(_height)
+    {
+    }
 
     void set_from_string(std::string geometry_string)
     {
         if (sscanf(geometry_string.c_str(), "%d,%d %dx%d", &x, &y, &width, &height) != 4)
         {
-            fprintf(stderr, "Bad geometry: %s, capturing whole output instead.\n",
-                geometry_string.c_str());
+            fprintf(stderr, "Bad geometry: %s, capturing whole output instead.\n", geometry_string.c_str());
             x = y = width = height = 0;
             return;
         }
@@ -864,11 +997,8 @@ struct capture_region
 
     bool contained_in(const capture_region& output) const
     {
-        return
-            output.x <= x &&
-            output.x + output.width >= x + width &&
-            output.y <= y &&
-            output.y + output.height >= y + height;
+        return output.x <= x && output.x + output.width >= x + width && output.y <= y &&
+               output.y + output.height >= y + height;
     }
 };
 
@@ -884,7 +1014,9 @@ static wf_recorder_output* detect_output_from_region(const capture_region& regio
         }
     }
 
-    std::cerr << "Failed to detect output based on geometry (is your geometry overlapping outputs?)" << std::endl;
+    std::cerr << "Failed to detect output based on geometry (is your geometry "
+                 "overlapping outputs?)"
+              << std::endl;
     return nullptr;
 }
 
@@ -942,6 +1074,9 @@ Use Ctrl+C to stop.)");
                             ffmpeg -pix_fmts
 
   -g, --geometry            Selects a specific part of the screen. The format is "x,y WxH".
+
+  -H, --address             Capture single Hyprland window address in hex. For example,
+                            -H $(hyprctl -j activewindow | jq -r .address)
 
   -h, --help                Prints this help screen.
 
@@ -1010,50 +1145,70 @@ Examples:)");
                                         The video file will be stored as <filename>.ext in the
                                         current working directory.)");
 #endif
-    printf(R"(
+    printf(
+        R"(
 
-)" "\n");
+)"
+        "\n");
     exit(EXIT_SUCCESS);
 }
 
 capture_region selected_region{};
-wf_recorder_output *chosen_output = nullptr;
-zwlr_screencopy_frame_v1 *frame = NULL;
+wf_recorder_output* chosen_output = nullptr;
+zwlr_screencopy_frame_v1* frame = NULL;
+hyprland_toplevel_export_frame_v1* hypr_frame = NULL;
 
 void request_next_frame()
 {
-    if (frame != NULL)
+    if (use_hypr)
     {
-        zwlr_screencopy_frame_v1_destroy(frame);
+        if (hypr_frame != NULL)
+        {
+            hyprland_toplevel_export_frame_v1_destroy(hypr_frame);
+            hypr_frame = NULL;
+        }
+        hypr_frame = hyprland_toplevel_export_manager_v1_capture_toplevel(hypr_manager, 1, hypr_address);
+        hyprland_toplevel_export_frame_v1_add_listener(hypr_frame, &toplevel_export_frame_listener, NULL);
     }
+    else
+    {
+        if (frame != NULL)
+        {
+            zwlr_screencopy_frame_v1_destroy(frame);
+        }
 
-    /* Capture the whole output if the user hasn't provided a good geometry */
-    if (!selected_region.is_selected())
-    {
-        frame = zwlr_screencopy_manager_v1_capture_output(
-            screencopy_manager, 1, chosen_output->output);
-    } else
-    {
-        frame = zwlr_screencopy_manager_v1_capture_output_region(
-            screencopy_manager, 1, chosen_output->output,
-            selected_region.x - chosen_output->x,
-            selected_region.y - chosen_output->y,
-            selected_region.width, selected_region.height);
+        /* Capture the whole output if the user hasn't provided a good geometry */
+        if (!selected_region.is_selected())
+        {
+            frame = zwlr_screencopy_manager_v1_capture_output(screencopy_manager, 1, chosen_output->output);
+        }
+        else
+        {
+            frame = zwlr_screencopy_manager_v1_capture_output_region(
+                screencopy_manager,
+                1,
+                chosen_output->output,
+                selected_region.x - chosen_output->x,
+                selected_region.y - chosen_output->y,
+                selected_region.width,
+                selected_region.height);
+        }
+
+        zwlr_screencopy_frame_v1_add_listener(frame, &frame_listener, NULL);
     }
-
-    zwlr_screencopy_frame_v1_add_listener(frame, &frame_listener, NULL);
 }
 
 static void parse_codec_opts(std::map<std::string, std::string>& options, const std::string param)
 {
     size_t pos;
     pos = param.find("=");
-    if (pos != std::string::npos && pos != param.length() -1)
+    if (pos != std::string::npos && pos != param.length() - 1)
     {
         auto optname = param.substr(0, pos);
         auto optvalue = param.substr(pos + 1, param.length() - pos - 1);
         options.insert(std::pair<std::string, std::string>(optname, optvalue));
-    } else
+    }
+    else
     {
         std::cerr << "Invalid codec option " + param << std::endl;
     }
@@ -1067,7 +1222,7 @@ static void init_wayland_client()
         fprintf(stderr, "failed to create display: %m\n");
         exit(EXIT_FAILURE);
     }
-    struct wl_registry *registry = wl_display_get_registry(display);
+    struct wl_registry* registry = wl_display_get_registry(display);
     wl_registry_add_listener(registry, &registry_listener, NULL);
     sync_wayland();
 }
@@ -1081,8 +1236,7 @@ static void list_available_outputs()
     exit(EXIT_SUCCESS);
 }
 
-
-int main(int argc, char *argv[])
+int main(int argc, char* argv[])
 {
     FrameWriterParams params = FrameWriterParams(exit_main_loop);
     params.file = "recording." + std::string(DEFAULT_CONTAINER_FORMAT);
@@ -1100,147 +1254,152 @@ int main(int argc, char *argv[])
     bool force_overwrite = false;
 
     struct option opts[] = {
-        { "output",            required_argument, NULL, 'o' },
-        { "file",              required_argument, NULL, 'f' },
-        { "muxer",             required_argument, NULL, 'm' },
-        { "geometry",          required_argument, NULL, 'g' },
-        { "codec",             required_argument, NULL, 'c' },
-        { "codec-param",       required_argument, NULL, 'p' },
-        { "framerate",         required_argument, NULL, 'r' },
-        { "pixel-format",      required_argument, NULL, 'x' },
-        { "audio-backend",     required_argument, NULL, '*' },
-        { "audio-codec",       required_argument, NULL, 'C' },
-        { "audio-codec-param", required_argument, NULL, 'P' },
-        { "sample-rate",       required_argument, NULL, 'R' },
-        { "sample-format",     required_argument, NULL, 'X' },
-        { "device",            required_argument, NULL, 'd' },
-        { "no-dmabuf",         no_argument,       NULL, '&' },
-        { "filter",            required_argument, NULL, 'F' },
-        { "log",               no_argument,       NULL, 'l' },
-        { "audio",             optional_argument, NULL, 'a' },
-        { "help",              no_argument,       NULL, 'h' },
-        { "bframes",           required_argument, NULL, 'b' },
-        { "buffrate",          required_argument, NULL, 'B' },
-        { "version",           no_argument,       NULL, 'v' },
-        { "no-damage",         no_argument,       NULL, 'D' },
-        { "overwrite",         no_argument,       NULL, 'y' },
-        { "list-output",       no_argument,       NULL, 'L' },
-        { 0,                   0,                 NULL,  0  }
-    };
+        {"output", required_argument, NULL, 'o'},
+        {"file", required_argument, NULL, 'f'},
+        {"muxer", required_argument, NULL, 'm'},
+        {"geometry", required_argument, NULL, 'g'},
+        {"codec", required_argument, NULL, 'c'},
+        {"codec-param", required_argument, NULL, 'p'},
+        {"framerate", required_argument, NULL, 'r'},
+        {"pixel-format", required_argument, NULL, 'x'},
+        {"audio-backend", required_argument, NULL, '*'},
+        {"audio-codec", required_argument, NULL, 'C'},
+        {"audio-codec-param", required_argument, NULL, 'P'},
+        {"sample-rate", required_argument, NULL, 'R'},
+        {"sample-format", required_argument, NULL, 'X'},
+        {"device", required_argument, NULL, 'd'},
+        {"no-dmabuf", no_argument, NULL, '&'},
+        {"filter", required_argument, NULL, 'F'},
+        {"log", no_argument, NULL, 'l'},
+        {"audio", optional_argument, NULL, 'a'},
+        {"help", no_argument, NULL, 'h'},
+        {"bframes", required_argument, NULL, 'b'},
+        {"buffrate", required_argument, NULL, 'B'},
+        {"version", no_argument, NULL, 'v'},
+        {"no-damage", no_argument, NULL, 'D'},
+        {"overwrite", no_argument, NULL, 'y'},
+        {"list-output", no_argument, NULL, 'L'},
+        {"address", required_argument, NULL, 'H'},
+        {0, 0, NULL, 0}};
 
     int c, i;
-    while((c = getopt_long(argc, argv, "o:f:m:g:c:p:r:x:C:P:R:X:d:b:B:la::hvDF:y:L", opts, &i)) != -1)
+    while ((c = getopt_long(argc, argv, "o:f:m:g:c:p:r:x:C:P:R:X:d:b:B:la::hvDF:yLH:", opts, &i)) != -1)
     {
-        switch(c)
+        switch (c)
         {
-            case 'f':
-                params.file = optarg;
-                break;
+        case 'f':
+            params.file = optarg;
+            break;
 
-            case 'F':
-                params.video_filter = optarg;
-                break;
+        case 'F':
+            params.video_filter = optarg;
+            break;
 
-            case 'o':
-                cmdline_output = optarg;
-                break;
+        case 'o':
+            cmdline_output = optarg;
+            break;
 
-            case 'm':
-                params.muxer = optarg;
-                break;
+        case 'm':
+            params.muxer = optarg;
+            break;
 
-            case 'g':
-                selected_region.set_from_string(optarg);
-                break;
+        case 'g':
+            selected_region.set_from_string(optarg);
+            break;
 
-            case 'c':
-                params.codec = optarg;
-                break;
+        case 'c':
+            params.codec = optarg;
+            break;
 
-            case 'r':
-                params.framerate = atoi(optarg);
-                break;
+        case 'r':
+            params.framerate = atoi(optarg);
+            break;
 
-            case 'x':
-                params.pix_fmt = optarg;
-                break;
+        case 'x':
+            params.pix_fmt = optarg;
+            break;
 
-            case 'C':
-                params.audio_codec = optarg;
-                break;
+        case 'C':
+            params.audio_codec = optarg;
+            break;
 
-            case 'R':
-                params.sample_rate = atoi(optarg);
-                break;
+        case 'R':
+            params.sample_rate = atoi(optarg);
+            break;
 
-            case 'X':
-                params.sample_fmt = optarg;
-                break;
+        case 'X':
+            params.sample_fmt = optarg;
+            break;
 
-            case 'd':
-                params.hw_device = optarg;
-                break;
+        case 'd':
+            params.hw_device = optarg;
+            break;
 
-            case 'b':
-                params.bframes = atoi(optarg);
-                break;
+        case 'b':
+            params.bframes = atoi(optarg);
+            break;
 
-            case 'B':
-                params.buffrate = atoi(optarg);
-                break;
+        case 'B':
+            params.buffrate = atoi(optarg);
+            break;
 
-            case 'l':
-                params.enable_ffmpeg_debug_output = true;
-                break;
+        case 'l':
+            params.enable_ffmpeg_debug_output = true;
+            break;
 
-            case 'a':
+        case 'a':
 #ifdef HAVE_AUDIO
-                params.enable_audio = true;
-                audioParams.audio_source = optarg ? strdup(optarg) : NULL;
+            params.enable_audio = true;
+            audioParams.audio_source = optarg ? strdup(optarg) : NULL;
 #else
-                std::cerr << "Cannot record audio. Built without audio support." << std::endl;
-                return EXIT_FAILURE;
+            std::cerr << "Cannot record audio. Built without audio support." << std::endl;
+            return EXIT_FAILURE;
 #endif
-                break;
+            break;
 
-            case 'h':
-                help();
-                break;
+        case 'h':
+            help();
+            break;
 
-            case 'p':
-                parse_codec_opts(params.codec_options, optarg);
-                break;
+        case 'p':
+            parse_codec_opts(params.codec_options, optarg);
+            break;
 
-            case 'v':
-                printf("wf-recorder %s\n", WFRECORDER_VERSION);
-                return 0;
+        case 'v':
+            printf("wf-recorder %s\n", WFRECORDER_VERSION);
+            return 0;
 
-            case 'D':
-                use_damage = false;
-                break;
+        case 'D':
+            use_damage = false;
+            break;
 
-            case 'P':
-                parse_codec_opts(params.audio_codec_options, optarg);
-                break;
+        case 'P':
+            parse_codec_opts(params.audio_codec_options, optarg);
+            break;
 
-            case '&':
-                force_no_dmabuf = true;
-                break;
+        case '&':
+            force_no_dmabuf = true;
+            break;
 
-            case 'y':
-                force_overwrite = true;
-                break;
+        case 'y':
+            force_overwrite = true;
+            break;
 
-            case 'L':
-                list_available_outputs();
-                break;
+        case 'L':
+            list_available_outputs();
+            break;
+
+        case 'H':
+            hypr_address = strtoul(optarg, NULL, 16);
+            use_hypr = true;
+            break;
 #ifdef HAVE_AUDIO
-            case '*':
-                audioParams.audio_backend = optarg;
-                break;
+        case '*':
+            audioParams.audio_backend = optarg;
+            break;
 #endif
-            default:
-                printf("Unsupported command line argument %s\n", optarg);
+        default:
+            printf("Unsupported command line argument %s\n", optarg);
         }
     }
 
@@ -1265,16 +1424,22 @@ int main(int argc, char *argv[])
         if (!params.hw_device.empty() && params.hw_device == drm_device_name && !force_no_dmabuf)
         {
             use_dmabuf = true;
-        } else if (force_no_dmabuf) {
+        }
+        else if (force_no_dmabuf)
+        {
             std::cerr << "Disabling DMA-BUF as requested on command line" << std::endl;
-        } else {
+        }
+        else
+        {
             std::cerr << "compositor running on different device, disabling DMA-BUF" << std::endl;
         }
 
         // region with dmabuf needs wlroots >= 0.17
         if (use_dmabuf && selected_region.is_selected())
         {
-            std::cerr << "region capture may not work with older wlroots, try --no-dmabuf if it fails" << std::endl;
+            std::cerr << "region capture may not work with older wlroots, try "
+                         "--no-dmabuf if it fails"
+                      << std::endl;
         }
 
         if (params.video_filter == "null")
@@ -1311,17 +1476,16 @@ int main(int argc, char *argv[])
     check_has_protos();
     load_output_info();
 
-    if (available_outputs.size() == 1)
+    if (available_outputs.size() == 1 || use_hypr)
     {
         chosen_output = &available_outputs.front();
-        if (chosen_output->name != cmdline_output &&
-            cmdline_output != default_cmdline_output)
+        if (chosen_output->name != cmdline_output && cmdline_output != default_cmdline_output)
         {
-            std::cerr << "Couldn't find requested output "
-                << cmdline_output << std::endl;
+            std::cerr << "Couldn't find requested output " << cmdline_output << std::endl;
             return EXIT_FAILURE;
         }
-    } else
+    }
+    else
     {
         for (auto& wo : available_outputs)
         {
@@ -1333,8 +1497,7 @@ int main(int argc, char *argv[])
         {
             if (cmdline_output != default_cmdline_output)
             {
-                std::cerr << "Couldn't find requested output "
-                    << cmdline_output.c_str() << std::endl;
+                std::cerr << "Couldn't find requested output " << cmdline_output.c_str() << std::endl;
                 return EXIT_FAILURE;
             }
 
@@ -1349,7 +1512,6 @@ int main(int argc, char *argv[])
         }
     }
 
-
     if (chosen_output == nullptr)
     {
         fprintf(stderr, "Failed to select output, exiting\n");
@@ -1360,20 +1522,29 @@ int main(int argc, char *argv[])
 
     if (selected_region.is_selected())
     {
-        if (!selected_region.contained_in({chosen_output->x, chosen_output->y,
-            chosen_output->width, chosen_output->height}))
+        if (!selected_region.contained_in(
+                {chosen_output->x, chosen_output->y, chosen_output->width, chosen_output->height}))
         {
-            fprintf(stderr, "Invalid region to capture: must be completely "
+            fprintf(
+                stderr,
+                "Invalid region to capture: must be completely "
                 "inside the output\n");
             selected_region = capture_region{};
         }
-    } else
+    }
+    else
     {
-        selected_region = capture_region{chosen_output->x, chosen_output->y,
-            chosen_output->width, chosen_output->height};
+        selected_region =
+            capture_region{chosen_output->x, chosen_output->y, chosen_output->width, chosen_output->height};
     }
 
-    fprintf(stderr, "selected region %d,%d %dx%d\n", selected_region.x, selected_region.y, selected_region.width, selected_region.height);
+    fprintf(
+        stderr,
+        "selected region %d,%d %dx%d\n",
+        selected_region.x,
+        selected_region.y,
+        selected_region.width,
+        selected_region.height);
 
     bool spawned_thread = false;
     std::thread writer_thread;
@@ -1383,32 +1554,34 @@ int main(int argc, char *argv[])
         signal(signo, handle_graceful_termination);
     }
 
-    while(!exit_main_loop)
+    while (!exit_main_loop)
     {
         // wait for a free buffer
-        while(buffers.capture().ready_capture() != true) {
+        while (buffers.capture().ready_capture() != true)
+        {
             std::this_thread::sleep_for(std::chrono::microseconds(500));
         }
 
         buffer_copy_done = false;
         request_next_frame();
 
-        while (!buffer_copy_done && !exit_main_loop && wl_display_dispatch(display) != -1) {
+        while (!buffer_copy_done && !exit_main_loop && wl_display_dispatch(display) != -1)
+        {
             // This space is intentionally left blank
         }
 
-        if (exit_main_loop) {
+        if (exit_main_loop)
+        {
             break;
         }
 
         auto& buffer = buffers.capture();
-        //std::cout << "first buffer at " << timespec_to_usec(get_ct()) / 1.0e6<< std::endl;
+        // std::cout << "first buffer at " << timespec_to_usec(get_ct()) / 1.0e6<<
+        // std::endl;
 
         if (!spawned_thread)
         {
-            writer_thread = std::thread([=] () {
-                write_loop(params);
-            });
+            writer_thread = std::thread([=]() { write_loop(params); });
 
             spawned_thread = true;
         }
@@ -1429,7 +1602,8 @@ int main(int argc, char *argv[])
             wl_buffer_destroy(buffer->wl_buffer);
     }
 
-    if (gbm_device) {
+    if (gbm_device)
+    {
         gbm_device_destroy(gbm_device);
         close(drm_fd);
     }
