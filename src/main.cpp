@@ -270,19 +270,22 @@ static void toplevel_export_frame_handle_buffer(
 {
     auto& buffer = buffers.capture();
     auto old_format = buffer.format;
+    uint32_t old_width = buffer.width;
+    uint32_t old_height = buffer.height;
+    uint32_t old_stride = buffer.stride;
     buffer.format = (wl_shm_format)format;
     buffer.drm_format = wl_shm_to_drm_format(format);
     buffer.width = width;
     buffer.height = height;
     buffer.stride = stride;
 
-    /* ffmpeg requires even width and height */
-    if (buffer.width % 2)
+    /* ffmpeg requires even width and height, but hyprland what it asked for, well hack this together later */
+    /*if (buffer.width % 2)
         buffer.width -= 1;
     if (buffer.height % 2)
-        buffer.height -= 1;
+        buffer.height -= 1;*/
 
-    if (!buffer.wl_buffer || old_format != format)
+    if (!buffer.wl_buffer || old_format != format || old_width != width || old_height != height || old_stride != stride)
     {
         free_shm_buffer(buffer);
         buffer.wl_buffer = create_shm_buffer(format, width, height, stride, &buffer.data);
@@ -293,8 +296,6 @@ static void toplevel_export_frame_handle_buffer(
         fprintf(stderr, "failed to create buffer\n");
         exit(EXIT_FAILURE);
     }
-
-    hyprland_toplevel_export_frame_v1_copy(frame, buffer.wl_buffer, !use_damage);
 }
 
 static void toplevel_export_frame_handle_damage(
@@ -338,6 +339,8 @@ static void toplevel_export_frame_handle_linux_dmabuf(
 
 static void toplevel_export_frame_handle_buffer_done(void* data, struct hyprland_toplevel_export_frame_v1* frame)
 {
+    auto& buffer = buffers.capture();
+    hyprland_toplevel_export_frame_v1_copy(frame, buffer.wl_buffer, !use_damage);
 }
 
 static const struct hyprland_toplevel_export_frame_v1_listener toplevel_export_frame_listener = {
@@ -761,9 +764,9 @@ static void write_loop(FrameWriterParams params)
             /* This is the first time buffer attributes are available */
             params.format = get_input_format(buffer);
             params.drm_format = buffer.drm_format;
-            params.width = buffer.width;
-            params.height = buffer.height;
-            params.stride = buffer.stride;
+            params.width = buffer.width / 2 * 2;
+            params.height = buffer.height / 2 * 2;
+            params.stride = buffer.stride / 2 * 2;
             frame_writer = std::unique_ptr<FrameWriter>(new FrameWriter(params));
 
 #ifdef HAVE_AUDIO
@@ -779,6 +782,8 @@ static void write_loop(FrameWriterParams params)
             }
 #endif
         }
+
+        frame_writer->set_size(buffer.width, buffer.height, buffer.stride);
 
         bool drop = false;
         uint64_t sync_timestamp = 0;
@@ -1078,6 +1083,8 @@ Use Ctrl+C to stop.)");
   -H, --address             Capture single Hyprland window address in hex. For example,
                             -H $(hyprctl -j activewindow | jq -r .address)
 
+  -z, --resize              Add some fancy letterboxing filters for capturing resized windows.
+
   -h, --help                Prints this help screen.
 
   -v, --version             Prints the version of wf-recorder.
@@ -1247,6 +1254,7 @@ int main(int argc, char* argv[])
     params.enable_ffmpeg_debug_output = false;
     params.enable_audio = false;
     params.bframes = -1;
+    params.resizable = false;
 
     constexpr const char* default_cmdline_output = "interactive";
     std::string cmdline_output = default_cmdline_output;
@@ -1280,10 +1288,11 @@ int main(int argc, char* argv[])
         {"overwrite", no_argument, NULL, 'y'},
         {"list-output", no_argument, NULL, 'L'},
         {"address", required_argument, NULL, 'H'},
+        {"resize", no_argument, NULL, 'z'},
         {0, 0, NULL, 0}};
 
     int c, i;
-    while ((c = getopt_long(argc, argv, "o:f:m:g:c:p:r:x:C:P:R:X:d:b:B:la::hvDF:yLH:", opts, &i)) != -1)
+    while ((c = getopt_long(argc, argv, "o:f:m:g:c:p:r:x:C:P:R:X:d:b:B:la::hvDF:yLH:z", opts, &i)) != -1)
     {
         switch (c)
         {
@@ -1392,6 +1401,10 @@ int main(int argc, char* argv[])
         case 'H':
             hypr_address = strtoul(optarg, NULL, 16);
             use_hypr = true;
+            break;
+
+        case 'z':
+            params.resizable = use_hypr;
             break;
 #ifdef HAVE_AUDIO
         case '*':
