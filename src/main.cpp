@@ -949,7 +949,7 @@ Use Ctrl+C to stop.)");
 
   -l, --log                 Generates a log on the current terminal. Debug purposes.
 
-  -L, --list-output          List the available outputs.
+  -L, --list-output         List the available outputs.
   
   -o, --output              Specify the output where the video is to be recorded.
 
@@ -981,6 +981,9 @@ Use Ctrl+C to stop.)");
                             -P <option_name>=<option_value>
   
   -y, --overwrite           Force overwriting the output file without prompting.
+
+  -T, --transform           Set buffer transform manually, ignore output transform.
+                            Any integer from wl_output::transform.
 
 Examples:)");
 #ifdef HAVE_AUDIO
@@ -1125,11 +1128,12 @@ int main(int argc, char *argv[])
         { "no-damage",         no_argument,       NULL, 'D' },
         { "overwrite",         no_argument,       NULL, 'y' },
         { "list-output",       no_argument,       NULL, 'L' },
+        { "transform",         required_argument, NULL, 'T' },
         { 0,                   0,                 NULL,  0  }
     };
 
     int c, i;
-    while((c = getopt_long(argc, argv, "o:f:m:g:c:p:r:x:C:P:R:X:d:b:B:la::hvDF:yL", opts, &i)) != -1)
+    while((c = getopt_long(argc, argv, "o:f:m:g:c:p:r:x:C:P:R:X:d:b:B:la::hvDF:yLT:", opts, &i)) != -1)
     {
         switch(c)
         {
@@ -1233,6 +1237,10 @@ int main(int argc, char *argv[])
 
             case 'L':
                 list_available_outputs();
+                break;
+
+            case 'T':
+                params.transform = atoi(optarg);
                 break;
 #ifdef HAVE_AUDIO
             case '*':
@@ -1356,7 +1364,9 @@ int main(int argc, char *argv[])
         return EXIT_FAILURE;
     }
 
-    params.transform = chosen_output->transform;
+    // ignore output transform if buffer transform is set manually
+    if (params.transform == -1)
+        params.transform = chosen_output->transform;
 
     if (selected_region.is_selected())
     {

@@ -68,7 +68,7 @@ struct FrameWriterParams
     int framerate = 0;
     int sample_rate;
     int buffrate = 0;
-    int32_t transform = 0;
+    int32_t transform = -1;
 
     int64_t audio_sync_offset;
 
